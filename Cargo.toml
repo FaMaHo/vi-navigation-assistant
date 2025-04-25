@@ -4,7 +4,7 @@
 # This table defines the package keys. 
 [package]
 # The package name
-name = "lab-2025"
+name = "vi-navigation-assistant"
 # Write your name and email here!
 authors = ["Your Name <your.email@domain>"]
 # Inherited from the workspace
@@ -16,9 +16,6 @@ rust-version.workspace = true
 [dependencies]
 # Lab utilities
 embassy-lab-utils = { path = "./embassy-lab-utils" }
-
-[dependencies]
-embassy = { version = "0.1", features = ["build"] }
 
 # Embedded hal utilities
 embassy-embedded-hal = { version = "0.3.0", git = "https://github.com/embassy-rs/embassy", rev = "2e7a2b6", features = ["defmt"] }
