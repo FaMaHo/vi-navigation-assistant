@@ -22,8 +22,13 @@ struct UltrasonicSensor<'d> {
     echo: Input<'d>,
 }
 
+// Define distance thresholds for improved real-world usability
+const CRITICAL_DISTANCE: f32 = 30.0;  // Very close - requires immediate attention
+const WARNING_DISTANCE: f32 = 60.0;   // Warning zone - needs awareness
+const NOTICE_DISTANCE: f32 = 100.0;   // Notice zone - gentle feedback
+
 #[embassy_executor::main]
-async fn main(spawner: Spawner) {
+async fn main(_spawner: Spawner) {
     // Get a handle to the RP's peripherals
     let p = embassy_rp::init(Default::default());
     
@@ -35,9 +40,13 @@ async fn main(spawner: Spawner) {
     let trigger_right = Output::new(p.PIN_16, Level::Low);
     let echo_right = Input::new(p.PIN_17, Pull::None);
     
-    // Buzzer
+    // Buzzer - only used for critical warnings
     let mut buzzer = Output::new(p.PIN_18, Level::Low);
     
+    // Vibrator motors - primary feedback mechanism
+    let mut vibration_left = Output::new(p.PIN_19, Level::Low);
+    let mut vibration_right = Output::new(p.PIN_20, Level::Low);
+
     // Create ultrasonic sensor handlers
     let mut ultrasonic_left = UltrasonicSensor {
         trigger: trigger_left,
@@ -55,7 +64,7 @@ async fn main(spawner: Spawner) {
         prev_right: 100.0,
     };
     
-    info!("Starting VisionAssist with dual sensors and advanced audio feedback!");
+    info!("Starting VisionAssist with progressive haptic feedback!");
     
     // Main loop
     loop {
@@ -72,11 +81,17 @@ async fn main(spawner: Spawner) {
         // Log distances
         info!("Left: {} cm | Right: {} cm", left_distance as u32, right_distance as u32);
         
-        // Provide advanced audio feedback
-        provide_advanced_audio_feedback(&mut buzzer, left_distance, right_distance).await;
+        // Provide progressive haptic and selective audio feedback
+        provide_feedback(
+            &mut buzzer, 
+            &mut vibration_left, 
+            &mut vibration_right, 
+            left_distance, 
+            right_distance
+        ).await;
         
-        // Small delay before next measurement cycle
-        Timer::after(Duration::from_millis(100)).await;
+        // Small delay before next measurement cycle - reduced for faster response
+        Timer::after(Duration::from_millis(50)).await;
     }
 }
 
@@ -172,141 +187,259 @@ async fn get_stable_distance(sensor: &mut UltrasonicSensor<'_>) -> f32 {
     }
 }
 
-// Simple low-pass filter to smooth distance readings
+// Enhanced low-pass filter to smooth distance readings
 fn filter_distance(current: f32, previous: f32) -> f32 {
     // Apply more weight to current reading (70%) and less to previous (30%)
+    // This provides good responsiveness while reducing noise
     current * 0.7 + previous * 0.3
 }
 
-// Provide audio feedback based on distances from both sensors
-async fn provide_advanced_audio_feedback(
+// Improved feedback function with very strong warning for extremely close obstacles
+async fn provide_feedback(
     buzzer: &mut Output<'_>,
+    vibration_left: &mut Output<'_>,
+    vibration_right: &mut Output<'_>,
     left_distance: f32,
     right_distance: f32,
 ) {
-    // Determine left/right danger zones
-    let left_danger = if left_distance < 60.0 { 
-        Some(categorize_distance(left_distance)) 
-    } else { 
-        None 
-    };
+    // IMPORTANT: Always explicitly set the motor states at the beginning
+    // This ensures both motors start from a known state (off)
+    vibration_left.set_low();
+    vibration_right.set_low();
     
-    let right_danger = if right_distance < 60.0 { 
-        Some(categorize_distance(right_distance)) 
-    } else { 
-        None 
-    };
+    // Check for extremely close obstacles first (emergency warning)
+    let extreme_danger_threshold = 10.0; // cm
+    let extreme_danger = left_distance < extreme_danger_threshold || right_distance < extreme_danger_threshold;
     
-    // If both sides detect obstacles
-    if left_danger.is_some() && right_danger.is_some() {
-        // Compare danger levels and prioritize higher danger
-        let left_level = left_danger.unwrap();
-        let right_level = right_danger.unwrap();
-        
-        if left_level > right_level {
-            // Left side is more dangerous
-            play_left_pattern(buzzer, left_level).await;
-        } else if right_level > left_level {
-            // Right side is more dangerous
-            play_right_pattern(buzzer, right_level).await;
-        } else {
-            // Equal danger - alert for both sides
-            play_center_pattern(buzzer, left_level).await;
-        }
-    } 
-    // Only left side detects an obstacle
-    else if left_danger.is_some() {
-        play_left_pattern(buzzer, left_danger.unwrap()).await;
+    if extreme_danger {
+        // Provide an unmistakable emergency warning
+        provide_extreme_danger_warning(buzzer, vibration_left, vibration_right).await;
+        // After emergency warning, return to prevent normal processing
+        return;
     }
-    // Only right side detects an obstacle
-    else if right_danger.is_some() {
-        play_right_pattern(buzzer, right_danger.unwrap()).await;
-    }
-    // No obstacles detected
-    else {
-        // No beep
-        buzzer.set_low();
-        Timer::after(Duration::from_millis(100)).await;
-    }
-}
-
-// Helper function to categorize distance into danger levels
-fn categorize_distance(distance: f32) -> u8 {
-    if distance < 15.0 {
-        3 // Highest danger
-    } else if distance < 30.0 {
-        2 // Medium danger
+    
+    // Normal processing continues below if no extreme danger detected
+    
+    // Process left side feedback
+    let left_intensity = if left_distance < NOTICE_DISTANCE {
+        calculate_vibration_intensity(left_distance)
     } else {
-        1 // Low danger
+        0 // No vibration
+    };
+    
+    // Process right side feedback
+    let right_intensity = if right_distance < NOTICE_DISTANCE {
+        calculate_vibration_intensity(right_distance)
+    } else {
+        0 // No vibration
+    };
+    
+    // First handle the left side vibration if needed
+    if left_intensity > 0 {
+        provide_haptic_feedback(vibration_left, left_intensity).await;
+        // Explicitly turn off after feedback pattern
+        vibration_left.set_low();
+    }
+    
+    // Then handle the right side vibration if needed
+    if right_intensity > 0 {
+        provide_haptic_feedback(vibration_right, right_intensity).await;
+        // Explicitly turn off after feedback pattern
+        vibration_right.set_low();
+    }
+    
+    // Only trigger audio warnings for critical distances (under 30cm)
+    if left_distance < CRITICAL_DISTANCE || right_distance < CRITICAL_DISTANCE {
+        // Determine which side is more critical
+        if left_distance < right_distance {
+            // Left side is more critical
+            provide_warning_sound(buzzer, left_distance).await;
+        } else {
+            // Right side is more critical
+            provide_warning_sound(buzzer, right_distance).await;
+        }
+    }
+    
+    // Ensure buzzer is off after feedback
+    buzzer.set_low();
+}
+
+// New function for extreme danger warning (very close obstacles)
+async fn provide_extreme_danger_warning(
+    buzzer: &mut Output<'_>,
+    vibration_left: &mut Output<'_>,
+    vibration_right: &mut Output<'_>,
+) {
+    // Unmistakable pattern: alternating strong vibrations with urgent sound
+    
+    // First cycle - buzzer + left motor
+    buzzer.set_high();
+    vibration_left.set_high();
+    Timer::after(Duration::from_millis(150)).await;
+    buzzer.set_low();
+    vibration_left.set_low();
+    Timer::after(Duration::from_millis(50)).await;
+    
+    // Second cycle - buzzer + right motor
+    buzzer.set_high();
+    vibration_right.set_high();
+    Timer::after(Duration::from_millis(150)).await;
+    buzzer.set_low();
+    vibration_right.set_low();
+    Timer::after(Duration::from_millis(50)).await;
+    
+    // Third cycle - buzzer + both motors (strongest warning)
+    buzzer.set_high();
+    vibration_left.set_high();
+    vibration_right.set_high();
+    Timer::after(Duration::from_millis(300)).await;
+    buzzer.set_low();
+    vibration_left.set_low();
+    vibration_right.set_low();
+    
+    // Short pause before returning to normal operation
+    Timer::after(Duration::from_millis(100)).await;
+}
+
+// Calculate vibration intensity on a more granular scale (0-10)
+fn calculate_vibration_intensity(distance: f32) -> u8 {
+    if distance < CRITICAL_DISTANCE {
+        // Critical zone - strongest vibration (levels 7-10)
+        let critical_range = CRITICAL_DISTANCE;
+        let normalized = (critical_range - distance.min(critical_range)) / critical_range;
+        let level = 7.0 + normalized * 3.0;
+        level as u8  // Simple truncation instead of rounding
+    } else if distance < WARNING_DISTANCE {
+        // Warning zone - medium vibration (levels 4-6)
+        let warning_range = WARNING_DISTANCE - CRITICAL_DISTANCE;
+        let normalized = (WARNING_DISTANCE - distance) / warning_range;
+        let level = 4.0 + normalized * 2.0;
+        level as u8
+    } else if distance < NOTICE_DISTANCE {
+        // Notice zone - gentle vibration (levels 1-3)
+        let notice_range = NOTICE_DISTANCE - WARNING_DISTANCE;
+        let normalized = (NOTICE_DISTANCE - distance) / notice_range;
+        let level = 1.0 + normalized * 2.0;
+        level as u8
+    } else {
+        // Beyond notice zone - no vibration
+        0
     }
 }
 
-// Different patterns for left obstacles
-async fn play_left_pattern(buzzer: &mut Output<'_>, danger_level: u8) {
-    match danger_level {
-        3 => { // Highest danger - very rapid beeps
-            for _ in 0..4 {
-                buzzer.set_high();
-                Timer::after(Duration::from_millis(30)).await;
-                buzzer.set_low();
-                Timer::after(Duration::from_millis(30)).await;
-            }
+// Modified haptic feedback function that properly manages motor state
+async fn provide_haptic_feedback(motor: &mut Output<'_>, intensity: u8) {
+    match intensity {
+        10 => { // Maximum intensity - continuous strong vibration
+            motor.set_high();
+            Timer::after(Duration::from_millis(80)).await;
+            // Don't turn off here - will be turned off by the caller
         },
-        2 => { // Medium danger - medium beeps
-            for _ in 0..2 {
-                buzzer.set_high();
-                Timer::after(Duration::from_millis(70)).await;
-                buzzer.set_low();
-                Timer::after(Duration::from_millis(70)).await;
-            }
+        9 => { // Very strong vibration - almost continuous with tiny breaks
+            motor.set_high();
+            Timer::after(Duration::from_millis(80)).await;
+            motor.set_low();
+            Timer::after(Duration::from_millis(20)).await;
+            motor.set_high();
+            Timer::after(Duration::from_millis(80)).await;
         },
-        _ => { // Low danger - single beep
-            buzzer.set_high();
+        8 => { // Strong vibration - brief pattern
+            motor.set_high();
+            Timer::after(Duration::from_millis(70)).await;
+            motor.set_low();
+            Timer::after(Duration::from_millis(30)).await;
+            motor.set_high();
+            Timer::after(Duration::from_millis(70)).await;
+        },
+        7 => { // Moderate-strong vibration
+            motor.set_high();
+            Timer::after(Duration::from_millis(60)).await;
+            motor.set_low();
+            Timer::after(Duration::from_millis(40)).await;
+            motor.set_high();
+            Timer::after(Duration::from_millis(60)).await;
+        },
+        6 => { // Moderate vibration
+            motor.set_high();
             Timer::after(Duration::from_millis(50)).await;
-            buzzer.set_low();
-            Timer::after(Duration::from_millis(150)).await;
+            motor.set_low();
+            Timer::after(Duration::from_millis(50)).await;
+            motor.set_high();
+            Timer::after(Duration::from_millis(50)).await;
+        },
+        5 => { // Medium vibration
+            motor.set_high();
+            Timer::after(Duration::from_millis(40)).await;
+            motor.set_low();
+            Timer::after(Duration::from_millis(60)).await;
+            motor.set_high();
+            Timer::after(Duration::from_millis(40)).await;
+        },
+        4 => { // Light-medium vibration
+            motor.set_high();
+            Timer::after(Duration::from_millis(30)).await;
+            motor.set_low();
+            Timer::after(Duration::from_millis(70)).await;
+            motor.set_high();
+            Timer::after(Duration::from_millis(30)).await;
+        },
+        3 => { // Light vibration
+            motor.set_high();
+            Timer::after(Duration::from_millis(20)).await;
+            motor.set_low();
+            Timer::after(Duration::from_millis(80)).await;
+            motor.set_high();
+            Timer::after(Duration::from_millis(20)).await;
+        },
+        2 => { // Very light vibration
+            motor.set_high();
+            Timer::after(Duration::from_millis(10)).await;
+            motor.set_low();
+            Timer::after(Duration::from_millis(90)).await;
+            motor.set_high();
+            Timer::after(Duration::from_millis(10)).await;
+        },
+        1 => { // Minimal vibration - just enough to notice
+            motor.set_high();
+            Timer::after(Duration::from_millis(5)).await;
+            motor.set_low();
+            Timer::after(Duration::from_millis(95)).await;
+            motor.set_high();
+            Timer::after(Duration::from_millis(5)).await;
+        },
+        _ => { // No vibration - ensure motor is off
+            motor.set_low();
+            Timer::after(Duration::from_millis(10)).await;
         }
     }
 }
 
-// Different patterns for right obstacles
-async fn play_right_pattern(buzzer: &mut Output<'_>, danger_level: u8) {
-    match danger_level {
-        3 => { // Highest danger - long then short
+// Provide warning sounds for critical distances
+async fn provide_warning_sound(buzzer: &mut Output<'_>, distance: f32) {
+    // Only active for distances under CRITICAL_DISTANCE (30cm)
+    if distance < 10.0 {
+        // Urgent alarm for very close objects (under 10cm)
+        // Rapid, high-pitched beeping
+        for _ in 0..3 {
             buzzer.set_high();
-            Timer::after(Duration::from_millis(200)).await;
+            Timer::after(Duration::from_millis(25)).await;
             buzzer.set_low();
-            Timer::after(Duration::from_millis(50)).await;
-            buzzer.set_high();
-            Timer::after(Duration::from_millis(50)).await;
-            buzzer.set_low();
-        },
-        2 => { // Medium danger - medium burst
-            buzzer.set_high();
-            Timer::after(Duration::from_millis(150)).await;
-            buzzer.set_low();
-            Timer::after(Duration::from_millis(50)).await;
-        },
-        _ => { // Low danger - single long beep
-            buzzer.set_high();
-            Timer::after(Duration::from_millis(100)).await;
-            buzzer.set_low();
-            Timer::after(Duration::from_millis(100)).await;
+            Timer::after(Duration::from_millis(25)).await;
         }
-    }
-}
-
-// Pattern for when both sides have equal danger
-async fn play_center_pattern(buzzer: &mut Output<'_>, danger_level: u8) {
-    // Center danger pattern (alternating short-long)
-    for _ in 0..danger_level {
+    } else if distance < 20.0 {
+        // Medium urgency alarm (10-20cm)
+        // Medium-paced beeping
+        for _ in 0..2 {
+            buzzer.set_high();
+            Timer::after(Duration::from_millis(50)).await;
+            buzzer.set_low();
+            Timer::after(Duration::from_millis(50)).await;
+        }
+    } else {
+        // Low urgency alarm (20-30cm)
+        // Single beep
         buzzer.set_high();
-        Timer::after(Duration::from_millis(50)).await;
+        Timer::after(Duration::from_millis(70)).await;
         buzzer.set_low();
-        Timer::after(Duration::from_millis(50)).await;
-        buzzer.set_high();
-        Timer::after(Duration::from_millis(100)).await;
-        buzzer.set_low();
-        Timer::after(Duration::from_millis(50)).await;
     }
 }
