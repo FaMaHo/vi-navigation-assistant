@@ -15,7 +15,7 @@ The Accessible Navigation Assistant is a wearable device designed to help visual
 - 2× HC-SR04 Ultrasonic Distance Sensors
 - 2× Vibration Motors
 - 1× Buzzer
-- Breadboard Power Supply Module ([example link](https://www.optimusdigital.ro/en/linear-regulators/2679-breadboard-power-supply.html))
+- Breadboard Power Supply Module
 - Breadboard, jumper wires, resistors, transistors, diodes, enclosure, straps
 
 ## How It Works
