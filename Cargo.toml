@@ -98,7 +98,7 @@ embedded-hal-bus = { version = "0.1", features = ["async"] }
 embedded-io-async = { version = "0.6.1", features = ["defmt-03"] }
 
 # Statically allocated, initialized at runtime cell
-static_cell = "2.1"
+static_cell = { version = "2.1", features = ["nightly"] }
 
 # Traits that can be implemented to provide access to non-volatile storage 
 embedded-storage = { version = "0.3" }

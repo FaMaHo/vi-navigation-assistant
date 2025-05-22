@@ -3,8 +3,9 @@
 //! # Example for editing this module:
 //! ```rust,ignore
 //! // I2C peripheral interrupt handler
-//! use embassy_rp::i2c::InterruptHandler as I2cInterruptHandler;
-//! use embassy_rp::peripherals::I2C1;
+//! use embassy_rp::bind_interrupts;
+//! use embassy_rp::gpio::InterruptHandler as GpioInterruptHandler;
+//! use embassy_rp::peripherals::IO_BANK0;
 //!
 //! bind_interrupts!(
 //!    pub(super) struct Irqs {

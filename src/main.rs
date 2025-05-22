@@ -2,13 +2,19 @@
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_rp::gpio::{Input, Level, Output, Pull};
+use embassy_rp::{
+    gpio::{Input, Level, Output, Pull},
+};
 use embassy_time::{Duration, Timer, Instant};
-use {defmt_rtt as _, panic_probe as _};
-use defmt::*;
+use defmt::info;
+use defmt_rtt as _; // Import defmt RTT logger
+use panic_probe as _; // Import panic handler
 
-// for handling interrupts
+// for handling interrupts and wifi
 mod irqs;
+mod tcp_server;
+mod web_server;
+mod wifi_utils;
 
 // keeping track of previous distances for smoothing
 struct DistanceState {
@@ -28,26 +34,53 @@ const WARNING_DISTANCE: f32 = 60.0;   // getting closer
 const NOTICE_DISTANCE: f32 = 100.0;   // far enough but worth noting
 
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
-    // initialize RP2040 
+async fn main(spawner: Spawner) {
+    info!("Starting VisionAssist with WiFi configuration...");
+
+    // Initialize the RP2040 and keep a reference to the pins we'll need
     let p = embassy_rp::init(Default::default());
     
-    // left sensor pins
-    let trigger_left = Output::new(p.PIN_14, Level::Low);
-    let echo_left = Input::new(p.PIN_15, Pull::None);
+    // Save the pins we need for our sensors and feedback BEFORE WiFi init
+    let pin_14 = p.PIN_14;
+    let pin_15 = p.PIN_15;
+    let pin_16 = p.PIN_16;
+    let pin_17 = p.PIN_17;
+    let pin_18 = p.PIN_18;
+    let pin_19 = p.PIN_19;
+    let pin_20 = p.PIN_20;
     
-    // right sensor pins
-    let trigger_right = Output::new(p.PIN_16, Level::Low);
-    let echo_right = Input::new(p.PIN_17, Pull::None);
+    // Initialize network stack
+    info!("Initializing network stack...");
+    let (stack, socket) = wifi_utils::init_network_stack(
+        &spawner,
+        p.PIN_23,
+        p.PIN_24,
+        p.PIN_25,
+        p.PIN_29,
+        p.PIO0,
+        p.DMA_CH2,
+    ).await;
+    info!("Network stack initialized successfully");
     
-    // buzzer for audio feedback
-    let mut buzzer = Output::new(p.PIN_18, Level::Low);
+    // Start TCP server
+    spawner.spawn(tcp_server::tcp_server_task(stack, socket)).unwrap();
     
-    // vibration motors
-    let mut vibration_left = Output::new(p.PIN_19, Level::Low);
-    let mut vibration_right = Output::new(p.PIN_20, Level::Low);
+    // Start web server
+    spawner.spawn(web_server::web_server_task(stack)).unwrap();
+    
+    // Now configure our sensor and feedback pins using the pins we saved
+    let trigger_left = Output::new(pin_14, Level::Low);
+    let echo_left = Input::new(pin_15, Pull::None);
+    
+    let trigger_right = Output::new(pin_16, Level::Low);
+    let echo_right = Input::new(pin_17, Pull::None);
+    
+    let mut buzzer = Output::new(pin_18, Level::Low);
+    
+    let mut vibration_left = Output::new(pin_19, Level::Low);
+    let mut vibration_right = Output::new(pin_20, Level::Low);
 
-    // create sensor objects
+    // Create sensor objects
     let mut ultrasonic_left = UltrasonicSensor {
         trigger: trigger_left,
         echo: echo_left,
@@ -58,30 +91,44 @@ async fn main(_spawner: Spawner) {
         echo: echo_right,
     };
     
-    // initial distance state
+    // Initial distance state
     let mut distance_state = DistanceState {
         prev_left: 100.0,
         prev_right: 100.0,
     };
     
-    info!("Starting VisionAssist with progressive haptic feedback!");
+    info!("Sensors and feedback systems initialized");
+    info!("Connect to WiFi AP 'VisionAssist' to configure device");
+    info!("TCP server running on port 8080, Web interface on port 80");
     
-    // main loop
+    // Main loop
     loop {
-        // get left distance
-        let raw_left = get_stable_distance(&mut ultrasonic_left).await;
+        // Get left distance
+        let raw_left = match get_stable_distance(&mut ultrasonic_left).await {
+            Ok(dist) => dist,
+            Err(_) => 100.0, // Default safe value on error
+        };
         let left_distance = filter_distance(raw_left, distance_state.prev_left);
         distance_state.prev_left = left_distance;
         
-        // get right distance
-        let raw_right = get_stable_distance(&mut ultrasonic_right).await;
+        // Get right distance
+        let raw_right = match get_stable_distance(&mut ultrasonic_right).await {
+            Ok(dist) => dist,
+            Err(_) => 100.0, // Default safe value on error
+        };
         let right_distance = filter_distance(raw_right, distance_state.prev_right);
         distance_state.prev_right = right_distance;
         
-        // for debugging - should remove before demo
+        // Update the shared state for TCP server
+        unsafe {
+            tcp_server::LEFT_DISTANCE = left_distance;
+            tcp_server::RIGHT_DISTANCE = right_distance;
+        }
+        
+        // Log distances for debugging
         info!("Left: {} cm | Right: {} cm", left_distance as u32, right_distance as u32);
         
-        // provide feedback based on distances
+        // Provide haptic and audio feedback
         provide_feedback(
             &mut buzzer, 
             &mut vibration_left, 
@@ -90,12 +137,12 @@ async fn main(_spawner: Spawner) {
             right_distance
         ).await;
         
-        // reduced delay from 200ms for better responsiveness
+        // Brief delay between measurements
         Timer::after(Duration::from_millis(50)).await;
     }
 }
 
-// ultrasonic sensor implementation
+// Ultrasonic sensor implementation
 impl<'d> UltrasonicSensor<'d> {
     async fn measure_distance(&mut self) -> Result<f32, &'static str> {
         // Send trigger pulse
@@ -105,7 +152,7 @@ impl<'d> UltrasonicSensor<'d> {
         
         // wait for echo to start with timeout
         let mut timeout = false;
-        let timeout_duration = Duration::from_millis(100); // increased from 50ms
+        let timeout_duration = Duration::from_millis(100);
         let start = Instant::now();
         
         while self.echo.is_low() {
@@ -154,12 +201,12 @@ impl<'d> UltrasonicSensor<'d> {
     }
 }
 
-// get more stable readings by averaging
-async fn get_stable_distance(sensor: &mut UltrasonicSensor<'_>) -> f32 {
+// Get stable distance readings by averaging
+async fn get_stable_distance(sensor: &mut UltrasonicSensor<'_>) -> Result<f32, &'static str> {
     let mut valid_readings = 0;
     let mut sum = 0.0;
     
-    // try up to 5 times to get 3 valid readings
+    // Try up to 5 times to get 3 valid readings
     for _ in 0..5 {
         if valid_readings >= 3 {
             break;
@@ -171,28 +218,28 @@ async fn get_stable_distance(sensor: &mut UltrasonicSensor<'_>) -> f32 {
                 valid_readings += 1;
             },
             Err(_) => {
-                // skip invalid readings
+                // Skip invalid readings
             }
         }
         Timer::after(Duration::from_millis(10)).await;
     }
     
     if valid_readings > 0 {
-        // return average
-        sum / (valid_readings as f32)
+        // Return average
+        Ok(sum / (valid_readings as f32))
     } else {
-        // no valid readings
-        100.0
+        // No valid readings
+        Err("Failed to get any valid distance readings")
     }
 }
 
-// simple low-pass filter to smooth readings
+// Simple low-pass filter to smooth readings
 fn filter_distance(current: f32, previous: f32) -> f32 {
-    // using 70/30 weighting for responsiveness
+    // Using 70/30 weighting for responsiveness
     current * 0.7 + previous * 0.3
 }
 
-// main feedback function
+// Main feedback function
 async fn provide_feedback(
     buzzer: &mut Output<'_>,
     vibration_left: &mut Output<'_>,
@@ -204,43 +251,43 @@ async fn provide_feedback(
     vibration_left.set_low();
     vibration_right.set_low();
     
-    // check for extremely close obstacles
+    // Check for extremely close obstacles
     let extreme_danger_threshold = 10.0; // cm
     let extreme_danger = left_distance < extreme_danger_threshold || right_distance < extreme_danger_threshold;
     
     if extreme_danger {
-        // special warning for very close objects
+        // Special warning for very close objects
         provide_extreme_danger_warning(buzzer, vibration_left, vibration_right).await;
         return;
     }
     
-    // left side intensity
+    // Left side intensity
     let left_intensity = if left_distance < NOTICE_DISTANCE {
         calculate_vibration_intensity(left_distance)
     } else {
         0 // no vibration
     };
     
-    // right side intensity
+    // Right side intensity
     let right_intensity = if right_distance < NOTICE_DISTANCE {
         calculate_vibration_intensity(right_distance)
     } else {
         0 // no vibration
     };
     
-    // apply left vibration
+    // Apply left vibration
     if left_intensity > 0 {
         provide_haptic_feedback(vibration_left, left_intensity).await;
         vibration_left.set_low();
     }
     
-    // apply right vibration
+    // Apply right vibration
     if right_intensity > 0 {
         provide_haptic_feedback(vibration_right, right_intensity).await;
         vibration_right.set_low();
     }
     
-    // sound only for close objects
+    // Sound only for close objects
     if left_distance < CRITICAL_DISTANCE || right_distance < CRITICAL_DISTANCE {
         if left_distance < right_distance {
             provide_warning_sound(buzzer, left_distance).await;
@@ -249,17 +296,17 @@ async fn provide_feedback(
         }
     }
     
-    // ensure buzzer is off
+    // Ensure buzzer is off
     buzzer.set_low();
 }
 
-// strong warning pattern for very close obstacles
+// Strong warning pattern for very close obstacles
 async fn provide_extreme_danger_warning(
     buzzer: &mut Output<'_>,
     vibration_left: &mut Output<'_>,
     vibration_right: &mut Output<'_>,
 ) {
-    // first pattern - left side
+    // First pattern - left side
     buzzer.set_high();
     vibration_left.set_high();
     Timer::after(Duration::from_millis(150)).await;
@@ -267,7 +314,7 @@ async fn provide_extreme_danger_warning(
     vibration_left.set_low();
     Timer::after(Duration::from_millis(50)).await;
     
-    // second pattern - right side
+    // Second pattern - right side
     buzzer.set_high();
     vibration_right.set_high();
     Timer::after(Duration::from_millis(150)).await;
@@ -275,7 +322,7 @@ async fn provide_extreme_danger_warning(
     vibration_right.set_low();
     Timer::after(Duration::from_millis(50)).await;
     
-    // third pattern - both sides
+    // Third pattern - both sides
     buzzer.set_high();
     vibration_left.set_high();
     vibration_right.set_high();
@@ -284,44 +331,44 @@ async fn provide_extreme_danger_warning(
     vibration_left.set_low();
     vibration_right.set_low();
     
-    // pause before next cycle
+    // Pause before next cycle
     Timer::after(Duration::from_millis(100)).await;
 }
 
-// calculate vibration intensity (0-10 scale)
+// Calculate vibration intensity (0-10 scale)
 fn calculate_vibration_intensity(distance: f32) -> u8 {
     if distance < CRITICAL_DISTANCE {
-        // critical zone (levels 7-10)
+        // Critical zone (levels 7-10)
         let critical_range = CRITICAL_DISTANCE;
         let normalized = (critical_range - distance.min(critical_range)) / critical_range;
         let level = 7.0 + normalized * 3.0;
         level as u8
     } else if distance < WARNING_DISTANCE {
-        // warning zone (levels 4-6)
+        // Warning zone (levels 4-6)
         let warning_range = WARNING_DISTANCE - CRITICAL_DISTANCE;
         let normalized = (WARNING_DISTANCE - distance) / warning_range;
         let level = 4.0 + normalized * 2.0;
         level as u8
     } else if distance < NOTICE_DISTANCE {
-        // notice zone (levels 1-3)
+        // Notice zone (levels 1-3)
         let notice_range = NOTICE_DISTANCE - WARNING_DISTANCE;
         let normalized = (NOTICE_DISTANCE - distance) / notice_range;
         let level = 1.0 + normalized * 2.0;
         level as u8
     } else {
-        // beyond notice zone
+        // Beyond notice zone
         0
     }
 }
 
-// haptic feedback patterns for different intensities
+// Haptic feedback patterns for different intensities
 async fn provide_haptic_feedback(motor: &mut Output<'_>, intensity: u8) {
     match intensity {
-        10 => { // maximum intensity
+        10 => { // Maximum intensity
             motor.set_high();
             Timer::after(Duration::from_millis(80)).await;
         },
-        9 => { // very strong
+        9 => { // Very strong
             motor.set_high();
             Timer::after(Duration::from_millis(80)).await;
             motor.set_low();
@@ -329,7 +376,7 @@ async fn provide_haptic_feedback(motor: &mut Output<'_>, intensity: u8) {
             motor.set_high();
             Timer::after(Duration::from_millis(80)).await;
         },
-        8 => { // strong
+        8 => { // Strong
             motor.set_high();
             Timer::after(Duration::from_millis(70)).await;
             motor.set_low();
@@ -353,7 +400,7 @@ async fn provide_haptic_feedback(motor: &mut Output<'_>, intensity: u8) {
             motor.set_high();
             Timer::after(Duration::from_millis(50)).await;
         },
-        5 => { // medium
+        5 => { // Medium
             motor.set_high();
             Timer::after(Duration::from_millis(40)).await;
             motor.set_low();
@@ -361,7 +408,7 @@ async fn provide_haptic_feedback(motor: &mut Output<'_>, intensity: u8) {
             motor.set_high();
             Timer::after(Duration::from_millis(40)).await;
         },
-        4 => { // light-medium
+        4 => { // Light-medium
             motor.set_high();
             Timer::after(Duration::from_millis(30)).await;
             motor.set_low();
@@ -369,7 +416,7 @@ async fn provide_haptic_feedback(motor: &mut Output<'_>, intensity: u8) {
             motor.set_high();
             Timer::after(Duration::from_millis(30)).await;
         },
-        3 => { // light
+        3 => { // Light
             motor.set_high();
             Timer::after(Duration::from_millis(20)).await;
             motor.set_low();
@@ -377,7 +424,7 @@ async fn provide_haptic_feedback(motor: &mut Output<'_>, intensity: u8) {
             motor.set_high();
             Timer::after(Duration::from_millis(20)).await;
         },
-        2 => { // very light
+        2 => { // Very light
             motor.set_high();
             Timer::after(Duration::from_millis(10)).await;
             motor.set_low();
@@ -385,7 +432,7 @@ async fn provide_haptic_feedback(motor: &mut Output<'_>, intensity: u8) {
             motor.set_high();
             Timer::after(Duration::from_millis(10)).await;
         },
-        1 => { // minimal
+        1 => { // Minimal
             motor.set_high();
             Timer::after(Duration::from_millis(5)).await;
             motor.set_low();
@@ -393,17 +440,17 @@ async fn provide_haptic_feedback(motor: &mut Output<'_>, intensity: u8) {
             motor.set_high();
             Timer::after(Duration::from_millis(5)).await;
         },
-        _ => { // no vibration
+        _ => { // No vibration
             motor.set_low();
             Timer::after(Duration::from_millis(10)).await;
         }
     }
 }
 
-// warning sounds for different distance ranges
+// Warning sounds for different distance ranges
 async fn provide_warning_sound(buzzer: &mut Output<'_>, distance: f32) {
     if distance < 10.0 {
-        // very close - rapid beeping
+        // Very close - rapid beeping
         for _ in 0..3 {
             buzzer.set_high();
             Timer::after(Duration::from_millis(25)).await;
@@ -411,7 +458,7 @@ async fn provide_warning_sound(buzzer: &mut Output<'_>, distance: f32) {
             Timer::after(Duration::from_millis(25)).await;
         }
     } else if distance < 20.0 {
-        // medium close - moderate beeping
+        // Medium close - moderate beeping
         for _ in 0..2 {
             buzzer.set_high();
             Timer::after(Duration::from_millis(50)).await;
@@ -419,7 +466,7 @@ async fn provide_warning_sound(buzzer: &mut Output<'_>, distance: f32) {
             Timer::after(Duration::from_millis(50)).await;
         }
     } else {
-        // not as close - single beep
+        // Not as close - single beep
         buzzer.set_high();
         Timer::after(Duration::from_millis(70)).await;
         buzzer.set_low();
