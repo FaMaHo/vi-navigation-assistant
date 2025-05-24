@@ -9,6 +9,7 @@ The Accessible Navigation Assistant is a wearable device designed to help visual
 - Audio alerts for critical proximity
 - Real-time, responsive operation
 - Easy prototyping with breadboard power supply
+- WiFi connectivity for remote monitoring and configuration
 
 ## Hardware Overview
 - Raspberry Pi Pico W (RP2040)
@@ -23,31 +24,61 @@ The device continuously measures distances to the left and right using ultrasoni
 
 ## Getting Started
 
+### Prerequisites
+- Rust toolchain (install from https://www.rust-lang.org/tools/install)
+- Raspberry Pi Pico W
+- Required hardware components (see Hardware Overview)
+- Debug probe (optional, for development)
+
 ### Hardware Assembly
-- Connect the ultrasonic sensors, vibration motors, and buzzer to the Raspberry Pi Pico W as per the schematic.
-- Power the system using the breadboard power supply module.
-- (Schematic and assembly guide: _coming soon_)
+1. Connect the ultrasonic sensors, vibration motors, and buzzer to the Raspberry Pi Pico W as per the schematic in `ProjectKiCADSchematic/`.
+2. Power the system using the breadboard power supply module.
+3. For development, connect a debug probe to the Pico W's debug pins.
 
 ### Software Setup
-- Install the [Rust toolchain](https://www.rust-lang.org/tools/install).
-- Clone this repository.
-- Build and flash the firmware to the Pico W:
-  ```sh
-  cargo build --release
-  # Use your preferred method to flash the .uf2 or binary to the Pico W
-  ```
-- (More detailed instructions: _coming soon_)
+1. Clone this repository:
+   ```sh
+   git clone https://github.com/FaMaHo/vi-navigation-assistant.git
+   cd vi-navigation-assistant
+   ```
 
-## Code Structure
-- `src/main.rs`: Main application logic, sensor reading, feedback control
-- `src/irqs.rs`: Interrupt handling (if applicable)
-- `Cargo.toml`: Project dependencies
+2. Build the project:
+   ```sh
+   cargo build --release
+   ```
 
-## Planned Features / Roadmap
-- WiFi connectivity and web configuration
-- Smartphone integration
-- Machine learning for advanced obstacle classification
-- Additional sensor support
+3. Flash the firmware:
+   - For development with debug probe:
+     ```sh
+     cargo run
+     ```
+   - For direct flashing:
+     - Put the Pico W in bootloader mode
+     - Copy the generated `.uf2` file from `target/thumbv6m-none-eabi/release/` to the mounted Pico W drive
+
+## Project Structure
+```
+.
+├── src/                    # Source code
+│   ├── main.rs            # Main application logic
+│   └── irqs.rs            # Interrupt handling
+├── ProjectKiCADSchematic/ # KiCAD project files
+├── firmware/              # Firmware files
+├── cyw43-firmware/        # WiFi firmware
+├── datasheets/           # Component datasheets
+├── embassy-lab-utils/    # Utility functions
+├── Cargo.toml            # Project dependencies
+└── memory.x              # Memory layout configuration
+```
+
+## Development
+- The project uses the `embassy` async runtime for efficient task management
+- WiFi functionality is implemented using the `cyw43` driver
+- Debug probe support is included for development and debugging
 
 ## Contributing
-We welcome contributions! Please open issues or pull requests to help improve the project.
+We welcome contributions! Please:
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Submit a pull request
