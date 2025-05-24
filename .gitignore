@@ -19,6 +19,18 @@ Cargo.lock
 .LSOverride
 ._*
 
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Log files
+*.log
+
+# Test coverage
+coverage/
+*.profraw
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
